@@ -18,7 +18,7 @@ define("minfields", default=1, help="min numfields")
 define("maxfields", default=16, help="max numfields")
 
 
-def randomfields(a, b):
+def randomfields():
     """ generate dict with random items """
     fields = {}
     for i in range(random.randint(options.minfields, options.maxfields)):
@@ -26,7 +26,7 @@ def randomfields(a, b):
     return fields
 
 
-def genmessage(n, a, b):
+def genmessage(n):
     request = bytes('', encoding='utf-8')
     a = 0
     # первый байт 0
@@ -41,7 +41,7 @@ def genmessage(n, a, b):
     request += state.to_bytes(1, byteorder='big', signed=False)
     # request += (options.id+'\n').encode()
     # numfields по количеству элементов словаря
-    fields = randomfields(a, b)
+    fields = randomfields()
     numfields = len(fields)
     request += numfields.to_bytes(1, byteorder='big', signed=False)
     # поля из словаря
@@ -66,7 +66,7 @@ def send_message():
     stream = yield TCPClient().connect(options.host, options.port)
     n = 1
     while True:
-        request = genmessage(n, 0, 16)
+        request = genmessage(n)
         request += (b'\r\n')
         yield stream.write(request)
         print("Sent    : ", request)
