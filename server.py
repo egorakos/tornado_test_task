@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import logging
 from tornado.ioloop import IOLoop
@@ -14,9 +14,41 @@ define("viewer_port", default=8889, help="TCP port for viewers")
 logger = logging.getLogger(__name__)
 
 
+def message_pharser(data):
+    datadict = {}
+    if int.from_bytes(data[:1], byteorder='big', signed=False):
+        datadict['firstbyte'] = True
+    datadict['message_num'] = int.from_bytes(
+        data[1:3], byteorder='big', signed=False
+        )
+    datadict['client_id'] = data[3:11].decode('ascii')
+    datadict['state'] = int.from_bytes(
+        data[11:12],
+        byteorder='big', signed=False
+        )
+    datadict['numfields'] = int.from_bytes(
+        data[12:13], byteorder='big', signed=False
+        )
+    datadict['zxor1'] = int.from_bytes(
+        data[-3:-2], byteorder='big', signed=False
+        )
+    datadict['zxor2'] = reduce(lambda x, y: x ^ y, data[:-3])
+    pos = 13
+    datadict['fields'] = []
+    for n in range(datadict['numfields']):
+        fieldname = data[pos:pos+8].decode('ascii')
+        fieldval = int.from_bytes(
+            data[pos+8:pos+12], byteorder='big', signed=False
+            )
+        pos += 12
+        datadict['fields'].append((fieldname, fieldval))
+    return(datadict)
+
+
 class ClientsServer(TCPServer):
     clients = {}
     messages = []
+
 
     @gen.coroutine
     def handle_stream(self, stream, address):
@@ -25,57 +57,48 @@ class ClientsServer(TCPServer):
         while True:
             try:
                 data = yield stream.read_until(b"\r\n")
-                if int.from_bytes(data[:1], byteorder='big', signed=False):
-                    raise Exception('wrong header')
-                message_num = int.from_bytes(
-                    data[1:3], byteorder='big', signed=False
-                    )
-                client_id = data[3:11].decode('ascii')
-                state = int.from_bytes(
-                    data[11:12],
-                    byteorder='big', signed=False
-                    )
-                numfields = int.from_bytes(
-                    data[12:13], byteorder='big', signed=False
-                    )
-                zxor1 = int.from_bytes(
-                    data[-3:-2], byteorder='big', signed=False
-                    )
-                zxor2 = reduce(lambda x, y: x ^ y, data[:-3])
-                ClientsServer.clients[address] = (
-                    client_id,
-                    message_num,
-                    state,
-                    int(timestamp())
-                    )
-                logger.info(
-                    "Recived message# %d from '%s' with %d fields:",
-                    message_num,
-                    client_id,
-                    numfields
-                    )
-                logger.info("checksums are %s and %s ", hex(zxor1), hex(zxor2))
-                if zxor1 != zxor2:
-                    raise Exception('checksum does not match')
-                pos = 13
-                viewer_msg = ''
-                for n in range(numfields):
-                    fieldname = data[pos:pos+8].decode('ascii')
-                    fieldval = int.from_bytes(
-                        data[pos+8:pos+12], byteorder='big', signed=False
+                dd = message_pharser(data)
+                if 'firstbyte' in dd.keys():
+                   raise Exception('wrong header')
+                else:
+                    if dd['zxor1'] != dd['zxor2']:
+                        raise Exception('checksum does not match')
+                    else:
+                        logger.info(
+                            "Recived message# %d from '%s' with %d fields:",
+                            dd['message_num'],
+                            dd['client_id'],
+                            dd['numfields']
+                            )
+                        logger.info(
+                            "xors are %s and %s, all right",
+                            hex(dd['zxor1']),
+                            hex(dd['zxor2'])
+                            )
+                    ClientsServer.clients[address] = (
+                        dd['client_id'],
+                        dd['message_num'],
+                        dd['state'],
+                        int(timestamp()),
                         )
-                    pos += 12
-                    logger.info("%s : %d ", fieldname, fieldval)
-                    viewer_msg += '[' + str(client_id) + ']'
-                    viewer_msg += fieldname + '|' + str(fieldval) + '\r\n'
-                ClientsServer.messages.append(viewer_msg)
-
-                client_msg = b"\x11" + data[1:3]
-                client_msg += reduce(lambda x, y: x ^ y, client_msg).to_bytes(
-                    1, byteorder='big', signed=False
-                    )
-                client_msg += b"\r\n"
-                yield stream.write(client_msg)
+                    viewer_msg = ''
+                    for field in dd['fields']:
+                        viewer_msg += '[{}]{}|{}\r\n'.format(
+                            str(dd['client_id']),
+                            str(field[0]),
+                            str(field[1])
+                            )
+                        logger.info("%s : %d ", field[0], field[1])
+                    ClientsServer.messages.append(viewer_msg)
+                    # формируем сообщение клиенту
+                    client_msg = b"\x11" + dd['message_num'].to_bytes(
+                        1, byteorder='big', signed=False
+                        )
+                    client_msg += reduce(lambda x, y: x ^ y, client_msg).to_bytes(
+                        1, byteorder='big', signed=False
+                        )
+                    client_msg += b"\r\n"
+                    yield stream.write(client_msg)
             except StreamClosedError:
                 logger.warning("Client %s left", address)
                 ClientsServer.clients.pop(address)
@@ -104,14 +127,18 @@ class ViewServer(TCPServer):
         clients = ''
         for a in ClientsServer.clients.keys():
             c = ClientsServer.clients[a]
-            clients += "[" + str(c[0]) + "]" + str(c[1]) + "|"
             if c[2] == 1:
-                clients += 'IDLE'
+                status = 'IDLE'
             elif c[2] == 2:
-                clients += 'ACTIVE'
+                status = 'ACTIVE'
             elif c[2] == 3:
-                clients += 'RECHARGE'
-            clients += "|" + str(int(timestamp())-c[3]) + "\r\n"
+                status= 'RECHARGE'
+            clients += "[{}]{}|{}|{} \r\n".format(
+                 str(c[0]),
+                 str(c[1]),
+                 status,
+                 str(int(timestamp())-c[3])
+                 )
         clients += '\n'
         yield stream.write(bytearray(clients, 'utf-8'))
 
